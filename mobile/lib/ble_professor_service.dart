@@ -1,13 +1,16 @@
 import 'dart:async';
 import 'dart:io' show Platform;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_ble_peripheral/flutter_ble_peripheral.dart';
 
 import 'ble_common.dart';
 import 'totp_helper.dart';
 
 /// Professor side: advertises "$sessionId:$rollingCode" and swaps in a fresh code every 5 s.
-/// Android only: iOS cannot put manufacturer data in an advertisement, so the payload cannot be sent.
+/// Android carries the payload in manufacturer data. iOS cannot advertise manufacturer data, so it
+/// carries the same payload inside a service UUID (see [encodeBeaconUuid]); the student scanner
+/// reads either form.
 class BleProfessorService {
   BleProfessorService({
     required this.sessionId,
@@ -38,11 +41,12 @@ class BleProfessorService {
   Timer? _timer;
   bool _running = false;
   bool _busy = false;
+  int _refreshes = 0;
 
   Future<void> startBroadcasting() async {
     if (_running) return;
-    if (!Platform.isAndroid) {
-      throw UnsupportedError('Broadcasting needs an Android phone: iOS cannot advertise manufacturer data.');
+    if (!Platform.isAndroid && !Platform.isIOS) {
+      throw UnsupportedError('Broadcasting needs an Android or iOS phone.');
     }
     if (!await requestBlePermissions(advertise: true)) {
       throw StateError('Bluetooth permission denied');
@@ -90,17 +94,27 @@ class BleProfessorService {
       if (!_running) return;
 
       final rollingCode = generateRollingCode(secretSeed, now: _now()); // in memory only
+      final AdvertiseDataCore data = Platform.isAndroid
+          ? AndroidAdvertiseData(
+              serviceUuid: kBeaconServiceUuid,
+              manufacturerId: kBeaconManufacturerId,
+              manufacturerData: encodeBeacon(sessionId, rollingCode),
+            )
+          // iOS drops manufacturer data: keep the shared FEED uuid (the scan filter) and put the
+          // payload in a second service uuid
+          : AdvertiseDataCore(serviceUuids: [kBeaconServiceUuid, encodeBeaconUuid(sessionId, rollingCode)]);
       final state = await _ble.start(
-        advertiseData: AndroidAdvertiseData(
-          serviceUuid: kBeaconServiceUuid,
-          manufacturerId: kBeaconManufacturerId,
-          manufacturerData: encodeBeacon(sessionId, rollingCode),
-        ),
+        advertiseData: data,
         // non-connectable, low-latency, high TX power: the plugin defaults, spelled out
         androidSettings: const AndroidAdvertiseSettings(advertiseSettings: AdvertiseSettings()),
       );
       if (state != PeripheralBluetoothState.ready) {
         throw StateError('Advertising did not start: ${state.name}');
+      }
+      if (kDebugMode) {
+        // never the code itself, only that a new one went on air
+        debugPrint('[BLE professor] advertising session=$sessionId refresh=${++_refreshes} '
+            'timeStep=${_now().millisecondsSinceEpoch ~/ _step.inMilliseconds}');
       }
     } finally {
       _busy = false;

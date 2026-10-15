@@ -5,6 +5,7 @@ import 'dart:io' show Platform;
 import 'package:android_id/android_id.dart';
 import 'package:crypto/crypto.dart';
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 
 import 'ble_common.dart';
@@ -65,7 +66,11 @@ class BleStudentService {
         timeout: scanWindow,
         continuousUpdates: true, // re-read RSSI and payload on every advert, not just the first
       );
-      return await found.future.timeout(scanWindow, onTimeout: () => null);
+      final beacon = await found.future.timeout(scanWindow, onTimeout: () => null);
+      if (kDebugMode) {
+        debugPrint('[BLE student] scan finished: ${beacon ?? (heardTooWeak ? 'only a too-weak signal' : 'no broadcast')}');
+      }
+      return beacon;
     } finally {
       await sub.cancel();
       await FlutterBluePlus.stopScan();
@@ -73,8 +78,10 @@ class BleStudentService {
   }
 
   ProfessorBeacon? _toBeacon(ScanResult r) {
-    final bytes = r.advertisementData.manufacturerData[kBeaconManufacturerId];
-    final payload = bytes == null ? null : decodeBeacon(bytes);
+    final payload = beaconFromAdvertisement(
+      manufacturerData: r.advertisementData.manufacturerData,
+      serviceUuids: r.advertisementData.serviceUuids.map((g) => g.str128),
+    );
     if (payload == null) return null; // not ours
     if (r.rssi < kMinRssi) {
       heardTooWeak = true; // ours, but too far away

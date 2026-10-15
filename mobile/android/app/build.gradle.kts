@@ -19,7 +19,8 @@ android {
         applicationId = "com.example.bleattendance.ble_attendance"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
-        minSdk = flutter.minSdkVersion
+        // BLE advertising + permission_handler need API 24+; never go below it whatever Flutter defaults to
+        minSdk = maxOf(24, flutter.minSdkVersion)
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName

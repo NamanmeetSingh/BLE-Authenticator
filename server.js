@@ -60,6 +60,7 @@ function createSession() {
     const session_id = crypto.randomBytes(2).toString('hex').toUpperCase();
     if (q.getSession.get(session_id)) continue;
     q.newSession.run(session_id, secret_seed, new Date().toISOString());
+    console.log(`  session ${session_id} started`); // never log the seed
     return { session_id, secret_seed, server_timestamp: Date.now() };
   }
   throw new Error('session id space exhausted');
@@ -70,6 +71,11 @@ const text = (v) => (typeof v === 'string' || typeof v === 'number' ? String(v).
 
 const app = express();
 app.use(express.json());
+// one line per request: method, path, status (bodies are never logged: they carry rolling codes)
+app.use((req, res, next) => {
+  res.on('finish', () => console.log(`${new Date().toISOString()} ${req.method} ${req.originalUrl} -> ${res.statusCode}`));
+  next();
+});
 
 app.post('/api/session/start', (req, res) => {
   res.status(201).json(createSession());
@@ -80,6 +86,7 @@ app.post('/api/session/stop', (req, res) => {
   if (!session_id) return res.status(400).json({ error: 'session_id is required' });
   if (!q.getSession.get(session_id)) return res.status(404).json({ error: 'unknown session' });
   q.stopSession.run(new Date().toISOString(), session_id); // idempotent
+  console.log(`  session ${session_id} stopped`);
   res.json({ session_id, is_active: false });
 });
 
@@ -106,6 +113,7 @@ app.post('/api/attendance/mark', (req, res) => {
   // Same roll no. marking twice is a no-op (first mark wins). A different roll no. on the same MAC is
   // always recorded — it is only flagged in the report.
   const info = q.mark.run(session_id, roll, name, mac, rssi, new Date().toISOString());
+  console.log(`  mark session=${session_id} roll=${roll} name=${name} rssi=${rssi} device=${mac} ${info.changes ? 'recorded' : 'already marked'}`);
   res.status(info.changes ? 201 : 200).json({ ok: true, already_marked: info.changes === 0 });
 });
 

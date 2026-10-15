@@ -28,6 +28,37 @@ final _beacon = RegExp(r'^([0-9A-Fa-f]{4}):([0-9A-Fa-f]{8})$');
   return m == null ? null : (sessionId: m[1]!.toUpperCase(), rollingCode: m[2]!.toLowerCase());
 }
 
+// iOS fallback: CoreBluetooth cannot advertise manufacturer data, but it can advertise service
+// UUIDs. The same payload is packed into one: "FEED" + sessionId, the 8 code chars, then a fixed
+// tail that marks it as ours (8-4-4-4-12 layout, so it is a valid 128-bit UUID).
+final _beaconUuid = RegExp(r'^FEED([0-9A-F]{4})-([0-9A-F]{4})-([0-9A-F]{4})-A77E-0A77E4DA7A00$');
+
+String encodeBeaconUuid(String sessionId, String rollingCode) {
+  final c = rollingCode.toUpperCase();
+  return 'FEED${sessionId.toUpperCase()}-${c.substring(0, 4)}-${c.substring(4)}-A77E-0A77E4DA7A00';
+}
+
+({String sessionId, String rollingCode})? decodeBeaconUuid(String uuid) {
+  final m = _beaconUuid.firstMatch(uuid.toUpperCase());
+  return m == null ? null : (sessionId: m[1]!, rollingCode: '${m[2]}${m[3]}'.toLowerCase());
+}
+
+/// Reads the beacon from whatever a scan result carries: manufacturer data (Android professor)
+/// first, then the service-UUID encoding (iOS professor). Null if neither is ours.
+({String sessionId, String rollingCode})? beaconFromAdvertisement({
+  required Map<int, List<int>> manufacturerData,
+  required Iterable<String> serviceUuids,
+}) {
+  final msd = manufacturerData[kBeaconManufacturerId];
+  final fromMsd = msd == null ? null : decodeBeacon(msd);
+  if (fromMsd != null) return fromMsd;
+  for (final uuid in serviceUuids) {
+    final fromUuid = decodeBeaconUuid(uuid);
+    if (fromUuid != null) return fromUuid;
+  }
+  return null;
+}
+
 /// Foreground-only runtime permissions. Returns false if the user refused any.
 /// Android 12+ needs the new Bluetooth permissions; Android 11 and below needs
 /// location to scan; iOS needs Bluetooth.

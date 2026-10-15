@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:ble_attendance/ble_common.dart';
 import 'package:ble_attendance/ble_student_service.dart';
 import 'package:ble_attendance/totp_helper.dart';
+import 'package:flutter_blue_plus/flutter_blue_plus.dart' show Guid;
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -30,6 +31,25 @@ void main() {
   test('ProfessorBeacon never prints the rolling code', () {
     const b = ProfessorBeacon(sessionId: '4A9F', rollingCode: 'deadbeef', rssi: -60);
     expect('$b', isNot(contains('deadbeef')));
+  });
+
+  test('iOS fallback: payload survives the round trip through a 128-bit service UUID', () {
+    final uuid = encodeBeaconUuid('4A9F', 'deadbeef');
+    expect(uuid, 'FEED4A9F-DEAD-BEEF-A77E-0A77E4DA7A00');
+    expect(Guid(uuid).str128, uuid.toLowerCase()); // a valid UUID for the BLE stack
+    // scanners report UUIDs in lowercase
+    expect(decodeBeaconUuid(uuid.toLowerCase()), (sessionId: '4A9F', rollingCode: 'deadbeef'));
+    expect(decodeBeaconUuid('0000feed-0000-1000-8000-00805f9b34fb'), isNull); // the plain FEED filter uuid
+    expect(decodeBeaconUuid('6e400001-b5a3-f393-e0a9-e50e24dcca9e'), isNull); // someone else's uuid
+  });
+
+  test('beaconFromAdvertisement reads manufacturer data first, then the UUID, else nothing', () {
+    final msd = {kBeaconManufacturerId: encodeBeacon('1111', 'aaaaaaaa')};
+    final uuids = ['0000feed-0000-1000-8000-00805f9b34fb', encodeBeaconUuid('2222', 'bbbbbbbb').toLowerCase()];
+
+    expect(beaconFromAdvertisement(manufacturerData: msd, serviceUuids: uuids)?.sessionId, '1111');
+    expect(beaconFromAdvertisement(manufacturerData: {}, serviceUuids: uuids), (sessionId: '2222', rollingCode: 'bbbbbbbb'));
+    expect(beaconFromAdvertisement(manufacturerData: {0x004C: [1, 2, 3]}, serviceUuids: ['0000feed-0000-1000-8000-00805f9b34fb']), isNull);
   });
 
   test('hardware id is MAC-shaped, stable per phone and locally administered', () {
