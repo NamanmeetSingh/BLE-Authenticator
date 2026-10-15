@@ -1,0 +1,28 @@
+name: ble_attendance
+description: BLE classroom attendance app (Phase 2 - BLE service layer).
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  flutter_ble_peripheral: ^3.1.0 # professor: BLE advertising
+  flutter_blue_plus: ^1.34.5     # student: foreground BLE scanning
+  crypto: ^3.0.7                 # HMAC-SHA256 rolling code
+  device_info_plus: ^13.3.0      # iOS identifierForVendor, Android SDK level
+  android_id: ^0.5.2+1           # Android ANDROID_ID (device_info_plus only exposes Build.ID)
+  network_info_plus: ^8.2.2      # requested, currently unused: no OS exposes the phone's own MAC
+  permission_handler: ^13.0.2
+  http: ^1.6.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
