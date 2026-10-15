@@ -9,7 +9,12 @@ import 'totp_helper.dart';
 /// Professor side: advertises "$sessionId:$rollingCode" and swaps in a fresh code every 5 s.
 /// Android only: iOS cannot put manufacturer data in an advertisement, so the payload cannot be sent.
 class BleProfessorService {
-  BleProfessorService({required this.sessionId, required this.secretSeed, this.onError}) {
+  BleProfessorService({
+    required this.sessionId,
+    required this.secretSeed,
+    this.clockOffset = Duration.zero,
+    this.onError,
+  }) {
     if (!RegExp(r'^[0-9A-Fa-f]{4}$').hasMatch(sessionId)) {
       throw ArgumentError.value(sessionId, 'sessionId', 'must be 4 hex characters');
     }
@@ -17,6 +22,11 @@ class BleProfessorService {
 
   final String sessionId;
   final String secretSeed;
+
+  /// Server clock minus this phone's clock (from the start response's server_timestamp).
+  /// The server checks codes against ITS clock, so following it removes phone clock drift
+  /// as a failure mode.
+  final Duration clockOffset;
 
   /// Called when a background refresh fails (e.g. Bluetooth switched off mid-class).
   /// If null, the error is rethrown into the zone so it is not lost.
@@ -49,7 +59,7 @@ class BleProfessorService {
     // Start the 5 s timer on the epoch grid the server counts in, so every broadcast
     // code is "current" for its whole 5 s life and students keep a full extra step
     // (the server accepts +/-1) to post it after reading it.
-    final toBoundary = _step.inMilliseconds - DateTime.now().millisecondsSinceEpoch % _step.inMilliseconds;
+    final toBoundary = _step.inMilliseconds - _now().millisecondsSinceEpoch % _step.inMilliseconds;
     _timer = Timer(Duration(milliseconds: toBoundary), () {
       _tick();
       _timer = Timer.periodic(_step, (_) => _tick());
@@ -62,6 +72,8 @@ class BleProfessorService {
     _timer = null;
     await _ble.stop();
   }
+
+  DateTime _now() => DateTime.now().add(clockOffset);
 
   void _tick() => unawaited(_advertise().catchError((Object e, StackTrace s) {
         final handler = onError;
@@ -77,7 +89,7 @@ class BleProfessorService {
       await _ble.stop();
       if (!_running) return;
 
-      final rollingCode = generateRollingCode(secretSeed); // in memory only
+      final rollingCode = generateRollingCode(secretSeed, now: _now()); // in memory only
       final state = await _ble.start(
         advertiseData: AndroidAdvertiseData(
           serviceUuid: kBeaconServiceUuid,

@@ -27,6 +27,10 @@ class ProfessorBeacon {
 class BleStudentService {
   static const scanWindow = Duration(seconds: 6);
 
+  /// After a scan: true if the class broadcast was heard but only weaker than [kMinRssi].
+  /// Lets the UI tell "move closer" apart from "nothing is broadcasting".
+  bool heardTooWeak = false;
+
   /// Scans for up to 6 s and returns the first in-range professor beacon, or null if none was
   /// heard. Stops scanning as soon as one is found so the code is as fresh as possible.
   /// Throws StateError if permission is denied or Bluetooth is off.
@@ -34,6 +38,7 @@ class BleStudentService {
   /// ponytail: first in-range beacon wins. If neighbouring classrooms overlap, collect the whole
   /// window and take the strongest RSSI instead.
   Future<ProfessorBeacon?> scanForSession() async {
+    heardTooWeak = false;
     if (!await requestBlePermissions(advertise: false)) {
       throw StateError('Bluetooth permission denied');
     }
@@ -68,11 +73,13 @@ class BleStudentService {
   }
 
   ProfessorBeacon? _toBeacon(ScanResult r) {
-    if (r.rssi < kMinRssi) return null; // too far away
     final bytes = r.advertisementData.manufacturerData[kBeaconManufacturerId];
-    if (bytes == null) return null;
-    final payload = decodeBeacon(bytes);
-    if (payload == null) return null;
+    final payload = bytes == null ? null : decodeBeacon(bytes);
+    if (payload == null) return null; // not ours
+    if (r.rssi < kMinRssi) {
+      heardTooWeak = true; // ours, but too far away
+      return null;
+    }
     return ProfessorBeacon(sessionId: payload.sessionId, rollingCode: payload.rollingCode, rssi: r.rssi);
   }
 }
