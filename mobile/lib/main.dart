@@ -5,8 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show PlatformException;
 import 'package:http/http.dart' as http;
 
+import 'ble_common.dart';
 import 'ble_professor_service.dart';
 import 'ble_student_service.dart';
+import 'location_verifier_service.dart';
 
 /// Reachable from a USB-connected phone after `adb reverse tcp:3000 tcp:3000`.
 const _defaultServerUrl = 'http://127.0.0.1:3000';
@@ -18,11 +20,14 @@ void main() => runApp(const AttendanceApp());
 // ---------------------------------------------------------------------------
 
 class ApiException implements Exception {
-  const ApiException(this.status, this.message);
+  const ApiException(this.status, this.message, [this.body = const {}]);
 
   /// HTTP status, or 0 when the server could not be reached.
   final int status;
   final String message;
+
+  /// The server's JSON error body (e.g. spoof_reasons, distance_m, allowed_radius_m).
+  final Map<String, dynamic> body;
 
   @override
   String toString() => message;
@@ -55,7 +60,7 @@ class AttendanceApi {
       final decoded = _tryDecode(res.body);
       final data = decoded is Map<String, dynamic> ? decoded : <String, dynamic>{};
       if (res.statusCode >= 400) {
-        throw ApiException(res.statusCode, '${data['error'] ?? 'HTTP ${res.statusCode}'}');
+        throw ApiException(res.statusCode, '${data['error'] ?? 'HTTP ${res.statusCode}'}', data);
       }
       return data;
     } on TimeoutException {
@@ -73,13 +78,21 @@ class AttendanceApi {
     }
   }
 
-  /// POST /api/session/start
-  Future<({String sessionId, String secretSeed, int serverTimestamp})> startSession() async {
-    final d = await _call('POST', '/api/session/start');
+  /// POST /api/session/start. [location] is the professor's anchor; [hallRadiusM] overrides the
+  /// server's default hall radius (30 m).
+  Future<({String sessionId, String secretSeed, int serverTimestamp, double hallRadiusM})> startSession({
+    required LocationTelemetry location,
+    double? hallRadiusM,
+  }) async {
+    final d = await _call('POST', '/api/session/start', {
+      'location': location.toJson(),
+      'hall_radius_m': ?hallRadiusM,
+    });
     return (
       sessionId: d['session_id'] as String,
       secretSeed: d['secret_seed'] as String,
       serverTimestamp: (d['server_timestamp'] as num).toInt(),
+      hallRadiusM: (d['hall_radius_m'] as num).toDouble(),
     );
   }
 
@@ -90,14 +103,16 @@ class AttendanceApi {
   Future<AttendanceReport> getReport(String sessionId) async =>
       AttendanceReport.fromJson(await _call('GET', '/api/session/$sessionId/report'));
 
-  /// POST /api/attendance/mark. Returns true if this roll number was already marked.
-  Future<bool> markAttendance({
+  /// POST /api/attendance/mark. [alreadyMarked] is true if this roll number was marked before;
+  /// the distances are what the server measured against the professor's anchor.
+  Future<({bool alreadyMarked, double distanceM, double allowedRadiusM})> markAttendance({
     required String sessionId,
     required String rollNo,
     required String name,
     required String rollingCode,
     required int rssi,
     required String deviceId,
+    required LocationTelemetry location,
   }) async {
     final d = await _call('POST', '/api/attendance/mark', {
       'session_id': sessionId,
@@ -106,8 +121,13 @@ class AttendanceApi {
       'rolling_code': rollingCode,
       'rssi': rssi,
       'device_mac_address': deviceId,
+      'location': location.toJson(),
     });
-    return d['already_marked'] == true;
+    return (
+      alreadyMarked: d['already_marked'] == true,
+      distanceM: (d['distance_m'] as num).toDouble(),
+      allowedRadiusM: (d['allowed_radius_m'] as num).toDouble(),
+    );
   }
 }
 
@@ -118,13 +138,22 @@ class AttendanceRecord {
         deviceId = j['device_mac_address'] as String,
         rssi = (j['rssi'] as num).toInt(),
         proxyFlagged = j['proxy_flagged'] == true,
-        sharedWith = List<String>.from(j['shared_with_roll_nos'] as List);
+        sharedWith = List<String>.from(j['shared_with_roll_nos'] as List),
+        distanceM = (j['distance_m'] as num?)?.toDouble(),
+        allowedRadiusM = (j['allowed_radius_m'] as num?)?.toDouble(),
+        locationVerified = j['location_verified'] == true;
 
   final String name;
   final String rollNo;
   final String deviceId;
   final int rssi;
   final bool proxyFlagged;
+
+  /// Distance from the professor's anchor and the variance-widened bound it was checked against.
+  /// Null for records that have no location data.
+  final double? distanceM;
+  final double? allowedRadiusM;
+  final bool locationVerified;
 
   /// Other roll numbers marked from the same phone.
   final List<String> sharedWith;
@@ -153,8 +182,23 @@ class AttendanceReport {
         });
 }
 
+/// "Distance: 4.2m (Bound: 46.5m) • GPS Verified", shown to the professor per student and to the student on success.
+String gpsSummary(double distanceM, double boundM) =>
+    'Distance: ${distanceM.toStringAsFixed(1)}m (Bound: ${boundM.toStringAsFixed(1)}m) • GPS Verified';
+
+/// Awaits [f] into a (value, error) pair, so a future started early can't fail unobserved.
+Future<(T?, Object?)> _settle<T>(Future<T> f) async {
+  try {
+    return (await f, null);
+  } catch (e) {
+    return (null, e);
+  }
+}
+
 String describeError(Object e) => switch (e) {
-      ApiException() => e.message,
+      ApiException() => e.body['spoof_reasons'] is List
+          ? '${e.message}: ${(e.body['spoof_reasons'] as List).join(', ')}'
+          : e.message,
       StateError() => e.message,
       UnsupportedError() => e.message ?? 'Not supported on this device',
       PlatformException() => e.message ?? e.code,
@@ -388,7 +432,10 @@ class _RecordTile extends StatelessWidget {
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('RSSI ${record.rssi} dBm\nDevice ${record.deviceId}'),
+            Text(
+              'RSSI ${record.rssi} dBm\nDevice ${record.deviceId}\n'
+              '${record.locationVerified && record.distanceM != null && record.allowedRadiusM != null ? gpsSummary(record.distanceM!, record.allowedRadiusM!) : 'No GPS verification'}',
+            ),
             if (flagged)
               Padding(
                 padding: const EdgeInsets.only(top: 4),
@@ -398,6 +445,32 @@ class _RecordTile extends StatelessWidget {
                 ),
               ),
           ],
+        ),
+        isThreeLine: true,
+      ),
+    );
+  }
+}
+
+/// The professor's own fix, which the server uses as the centre of the lecture hall.
+class _AnchorCard extends StatelessWidget {
+  const _AnchorCard({required this.anchor, required this.hallRadiusM});
+  final LocationTelemetry anchor;
+  final double? hallRadiusM;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      child: ListTile(
+        dense: true,
+        leading: const Icon(Icons.my_location),
+        title: Text(
+          'Classroom Anchor  ·  ±${anchor.accuracy.toStringAsFixed(1)}m',
+          style: const TextStyle(fontWeight: FontWeight.bold),
+        ),
+        subtitle: Text(
+          '${anchor.lat.toStringAsFixed(6)}, ${anchor.lon.toStringAsFixed(6)}\n'
+          'Hall radius ${hallRadiusM?.toStringAsFixed(0) ?? '30'}m${anchor.wifiBssid != null ? '  ·  Wi-Fi AP recorded' : ''}',
         ),
         isThreeLine: true,
       ),
@@ -435,6 +508,9 @@ class _ProfessorScreenState extends State<ProfessorScreen> {
   bool _busy = false;
   String? _error; // server / network
   String? _bleError; // broadcaster
+  LocationTelemetry? _anchor; // the professor's own location, sent as the session's anchor
+  double? _hallRadiusM;
+  String? _phase; // what a slow start is currently waiting on
 
   @override
   void dispose() {
@@ -458,12 +534,16 @@ class _ProfessorScreenState extends State<ProfessorScreen> {
       _bleError = null;
       _report = null;
       _sessionId = null;
+      _anchor = null;
+      _phase = 'Reading the classroom location (two GPS fixes)…';
     });
     AttendanceApi? api;
     String? startedId;
     try {
       api = AttendanceApi(widget.serverUrl.text);
-      final s = await api.startSession();
+      final anchor = await LocationVerifierService().captureVerifiedLocationBurst();
+      _update(() => _phase = 'Starting the session…');
+      final s = await api.startSession(location: anchor);
       startedId = s.sessionId;
       final ble = BleProfessorService(
         sessionId: s.sessionId,
@@ -478,6 +558,8 @@ class _ProfessorScreenState extends State<ProfessorScreen> {
       _update(() {
         _ble = ble;
         _sessionId = s.sessionId;
+        _anchor = anchor;
+        _hallRadiusM = s.hallRadiusM;
       });
       unawaited(_refresh());
     } catch (e) {
@@ -487,7 +569,10 @@ class _ProfessorScreenState extends State<ProfessorScreen> {
       }
       _update(() => _error = describeError(e));
     } finally {
-      _update(() => _busy = false);
+      _update(() {
+        _busy = false;
+        _phase = null;
+      });
     }
   }
 
@@ -572,6 +657,13 @@ class _ProfessorScreenState extends State<ProfessorScreen> {
               style: Theme.of(context).textTheme.titleMedium,
             ),
           ),
+        if (_busy && _phase != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 12),
+            child: Text(_phase!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.black54)),
+          ),
+        if (_anchor != null)
+          Padding(padding: const EdgeInsets.only(top: 12), child: _AnchorCard(anchor: _anchor!, hallRadiusM: _hallRadiusM)),
         if (_bleError != null)
           Padding(padding: const EdgeInsets.only(top: 12), child: _Notice(_Status(_Tone.error, _bleError!))),
         if (_error != null)
@@ -660,32 +752,48 @@ class _StudentScreenState extends State<StudentScreen> {
       _scanning = true;
       _status = const _Status(
         _Tone.info,
-        'Scanning for the class broadcast…',
-        'Keep this phone near the professor\'s phone (up to 6 seconds).',
+        'Scanning for the class broadcast and reading your location…',
+        'Keep this phone near the professor\'s phone and a window (up to 30 seconds on a cold GPS start).',
       );
     });
 
     _Status result;
     try {
-      // Read the device id first, so the request follows the scan immediately:
-      // the broadcast code is only good for a few seconds.
+      // Read the device id and ask for every permission first, so no dialog opens mid-scan
+      // and the request follows the scan immediately.
       final deviceId = await getDeviceMacOrHardwareId();
-      final beacon = await _ble.scanForSession(); // asks for BLE permissions, rejects rssi < -75
+      if (!await requestBlePermissions(advertise: false)) throw StateError('Bluetooth permission denied');
+      final locationService = LocationVerifierService();
+      await locationService.ensureReady();
+      // BLE scan (drops rssi < -75) and the 2-fix GPS burst run side by side.
+      // Each is settled right away so neither can fail unobserved while the other is awaited.
+      final scan = _settle(_ble.scanForSession());
+      final gps = _settle(locationService.captureVerifiedLocationBurst());
+      var (beacon, scanError) = await scan;
+      final (location, gpsError) = await gps;
+      if (scanError != null) throw scanError;
       if (beacon == null) {
         result = _ble.heardTooWeak ? _weak : _noBroadcast;
       } else {
-        final already = await AttendanceApi(widget.serverUrl.text).markAttendance(
+        if (gpsError != null) throw gpsError;
+        // The broadcast code is only good for a few seconds: if the GPS burst outlasted it, read it again.
+        if (DateTime.now().difference(beacon.heardAt) > const Duration(seconds: 3)) {
+          beacon = await _ble.scanForSession() ?? beacon;
+        }
+        final marked = await AttendanceApi(widget.serverUrl.text).markAttendance(
           sessionId: beacon.sessionId,
           rollNo: roll,
           name: name,
           rollingCode: beacon.rollingCode,
           rssi: beacon.rssi,
           deviceId: deviceId,
+          location: location!,
         );
         result = _Status(
           _Tone.success,
           'Attendance Marked Verified!',
-          already ? 'Roll no $roll was already marked for this class.' : '$name ($roll) is marked present.',
+          '${marked.alreadyMarked ? 'Roll no $roll was already marked for this class.' : '$name ($roll) is marked present.'}\n'
+          '${gpsSummary(marked.distanceM, marked.allowedRadiusM)}',
         );
       }
     } on ApiException catch (e) {
@@ -701,9 +809,27 @@ class _StudentScreenState extends State<StudentScreen> {
   }
 
   _Status _fromApi(ApiException e) {
-    if (e.status == 403 && e.message.contains('weak')) return _weak;
-    if (e.status == 403 || e.status == 404) {
-      return _Status(_Tone.error, 'No Active Class Broadcast Found', e.message);
+    final msg = e.message;
+    if (e.status == 403 && msg.contains('weak')) return _weak;
+    if (e.status == 403 && msg.startsWith('Location authenticity')) {
+      final reasons = e.body['spoof_reasons'];
+      return _Status(
+        _Tone.error,
+        'Location Check Failed',
+        'Rejected because: ${reasons is List ? reasons.join(', ') : 'unknown reason'}',
+      );
+    }
+    if (e.status == 403 && msg.startsWith('Outside lecture hall')) {
+      final d = (e.body['distance_m'] as num?)?.toStringAsFixed(1);
+      final bound = (e.body['allowed_radius_m'] as num?)?.toStringAsFixed(1);
+      return _Status(
+        _Tone.error,
+        'Outside Lecture Hall Boundary',
+        'You are ${d ?? '?'}m from the professor; the allowed radius is ${bound ?? '?'}m.',
+      );
+    }
+    if ((e.status == 403 && msg.contains('not active')) || e.status == 404) {
+      return _Status(_Tone.error, 'No Active Class Broadcast Found', msg);
     }
     if (e.status == 401) {
       return const _Status(

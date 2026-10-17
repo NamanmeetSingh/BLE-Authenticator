@@ -20,6 +20,8 @@
     <!-- BLE scanning needs location on Android 11 and below (requested at runtime only there) -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!-- Wi-Fi router BSSID (co-location hint) needs this plus location -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 

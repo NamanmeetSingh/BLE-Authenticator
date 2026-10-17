@@ -13,11 +13,15 @@ import 'ble_common.dart';
 /// What the student phone heard from the professor phone.
 /// [rollingCode] goes straight into the attendance request; it must never be shown.
 class ProfessorBeacon {
-  const ProfessorBeacon({required this.sessionId, required this.rollingCode, required this.rssi});
+  ProfessorBeacon({required this.sessionId, required this.rollingCode, required this.rssi, DateTime? heardAt})
+      : heardAt = heardAt ?? DateTime.now();
 
   final String sessionId;
   final String rollingCode;
   final int rssi;
+
+  /// When the code was read: the server only accepts it for a few more seconds.
+  final DateTime heardAt;
 
   /// Leaves the code out so it cannot leak into a Text(), a log line or a crash report.
   @override

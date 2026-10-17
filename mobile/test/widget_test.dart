@@ -20,6 +20,22 @@ void main() {
     expect(find.text('Start Attendance Broadcast'), findsOneWidget);
   });
 
+  test('GPS summary line and the new report fields parse', () {
+    expect(gpsSummary(4.24, 46.52), 'Distance: 4.2m (Bound: 46.5m) • GPS Verified');
+    final r = AttendanceRecord.fromJson({
+      'student_roll_no': '1',
+      'student_name': 'N',
+      'device_mac_address': 'AA',
+      'rssi': -40,
+      'proxy_flagged': false,
+      'shared_with_roll_nos': <String>[],
+      'distance_m': 4.24,
+      'allowed_radius_m': 46.52,
+      'location_verified': true,
+    });
+    expect([r.distanceM, r.allowedRadiusM, r.locationVerified], [4.24, 46.52, true]);
+  });
+
   test('report splits verified from flagged, with shared phones grouped', () {
     Map<String, dynamic> rec(String roll, String mac, {List<String> shared = const []}) => {
           'student_roll_no': roll,

@@ -15,9 +15,10 @@ dependencies:
   crypto: ^3.0.7                 # HMAC-SHA256 rolling code
   device_info_plus: ^13.3.0      # iOS identifierForVendor, Android SDK level
   android_id: ^0.5.2+1           # Android ANDROID_ID (device_info_plus only exposes Build.ID)
-  network_info_plus: ^8.2.2      # requested, currently unused: no OS exposes the phone's own MAC
+  network_info_plus: ^8.2.2      # Wi-Fi router BSSID for the co-location hint (never the phone's own MAC)
   permission_handler: ^12.0.1    # 13.x needs Android SDK platform 37, which AGP 9.0.1 can't resolve yet
   http: ^1.6.0
+  geolocator: ^14.0.1            # GPS fixes for the location verification (14.x: latest for this Flutter SDK)
 
 dev_dependencies:
   flutter_test:

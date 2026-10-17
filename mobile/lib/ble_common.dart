@@ -75,3 +75,74 @@ Future<bool> requestBlePermissions({required bool advertise}) async {
   if (needed.isEmpty) return true;
   return (await needed.request()).values.every((s) => s.isGranted);
 }
+
+/// One location reading, or a 2-sample burst, in the shape the server's forensic checks expect
+/// (see evaluateLocationAuthenticity in server.js). [toJson] is the wire format.
+class LocationTelemetry {
+  const LocationTelemetry({
+    required this.lat,
+    required this.lon,
+    required this.accuracy,
+    required this.altitude,
+    required this.altitudeAccuracy,
+    required this.speed,
+    required this.timestamp,
+    required this.isMocked,
+    required this.sampleCount,
+    required this.jitterLatDelta,
+    required this.jitterLonDelta,
+    required this.jitterAccDelta,
+    this.wifiBssid,
+  });
+
+  /// Latest sample.
+  final double lat;
+  final double lon;
+
+  /// Horizontal uncertainty radius in metres.
+  final double accuracy;
+  final double altitude;
+
+  /// Vertical uncertainty in metres. 0.0 when the OS has no 3D fix.
+  final double altitudeAccuracy;
+
+  /// m/s
+  final double speed;
+
+  /// Fix time, milliseconds since the epoch.
+  final int timestamp;
+
+  /// OS mock flag: Android isMock(), iOS isSimulatedBySoftware / isProducedByAccessory.
+  final bool isMocked;
+
+  /// 1 or 2 (a second fix that times out on slow indoor hardware leaves 1).
+  final int sampleCount;
+
+  /// |sample2 - sample1|; all 0.0 with a single sample.
+  final double jitterLatDelta;
+  final double jitterLonDelta;
+  final double jitterAccDelta;
+
+  /// Lower-case router BSSID, null when not on Wi-Fi or the OS hides it.
+  final String? wifiBssid;
+
+  Map<String, Object?> toJson() => {
+        'lat': lat,
+        'lon': lon,
+        'accuracy': accuracy,
+        'altitude': altitude,
+        'altitude_accuracy': altitudeAccuracy,
+        'speed': speed,
+        'timestamp': timestamp,
+        'is_mocked': isMocked,
+        'sample_count': sampleCount,
+        'jitter_lat_delta': jitterLatDelta,
+        'jitter_lon_delta': jitterLonDelta,
+        'jitter_acc_delta': jitterAccDelta,
+        'wifi_bssid': wifiBssid,
+      };
+
+  /// No coordinates, so a stray print() or crash report can't leak where someone is.
+  @override
+  String toString() => 'LocationTelemetry(±${accuracy.toStringAsFixed(1)}m, $sampleCount sample(s))';
+}
