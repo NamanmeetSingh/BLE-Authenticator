@@ -12,12 +12,35 @@ void main() {
     expect(find.text('Backend Server URL'), findsOneWidget);
     expect(find.text('http://127.0.0.1:3000'), findsOneWidget);
     expect(find.text('Student Mode'), findsOneWidget);
-    expect(find.text('Scan & Mark Attendance'), findsOneWidget);
+    expect(find.text('Verify Both & Mark Attendance'), findsOneWidget);
 
     await tester.tap(find.byType(Switch));
     await tester.pump();
     expect(find.text('Professor Mode'), findsOneWidget);
     expect(find.text('Start Attendance Broadcast'), findsOneWidget);
+  });
+
+  testWidgets('student screen shows each check as its own step, and needs a name and roll first', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(800, 2400);
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(const AttendanceApp());
+
+    // three separate steps, each starting unchecked
+    expect(find.text('Step 1 · Bluetooth proximity'), findsOneWidget);
+    expect(find.text('Step 2 · Location'), findsOneWidget);
+    expect(find.text('Step 3 · Attendance submission'), findsOneWidget);
+    expect(find.text('Not checked yet'), findsNWidgets(2));
+    expect(find.text('Waiting for both checks'), findsOneWidget);
+    expect(find.text('Verify Bluetooth'), findsOneWidget);
+    expect(find.text('Verify Location'), findsOneWidget);
+
+    // with no name or roll number nothing runs: the submit step explains why and the checks stay idle
+    await tester.tap(find.text('Verify Both & Mark Attendance'));
+    await tester.pump();
+    expect(find.text('Enter your name and roll number'), findsOneWidget);
+    expect(find.text('Not checked yet'), findsNWidgets(2));
   });
 
   test('GPS summary line and the new report fields parse', () {

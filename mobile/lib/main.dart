@@ -186,15 +186,6 @@ class AttendanceReport {
 String gpsSummary(double distanceM, double boundM) =>
     'Distance: ${distanceM.toStringAsFixed(1)}m (Bound: ${boundM.toStringAsFixed(1)}m) • GPS Verified';
 
-/// Awaits [f] into a (value, error) pair, so a future started early can't fail unobserved.
-Future<(T?, Object?)> _settle<T>(Future<T> f) async {
-  try {
-    return (await f, null);
-  } catch (e) {
-    return (null, e);
-  }
-}
-
 String describeError(Object e) => switch (e) {
       ApiException() => e.body['spoof_reasons'] is List
           ? '${e.message}: ${(e.body['spoof_reasons'] as List).join(', ')}'
@@ -310,31 +301,14 @@ class _HomeScreenState extends State<HomeScreen> {
 // Shared UI bits
 // ---------------------------------------------------------------------------
 
-enum _Tone {
-  success(Colors.green, Icons.check_circle),
-  warning(Colors.orange, Icons.warning_amber_rounded),
-  error(Colors.red, Icons.error_outline),
-  info(Colors.blueGrey, Icons.bluetooth_searching);
-
-  const _Tone(this.color, this.icon);
-  final MaterialColor color;
-  final IconData icon;
-}
-
-class _Status {
-  const _Status(this.tone, this.title, [this.detail]);
-  final _Tone tone;
-  final String title;
-  final String? detail;
-}
-
+/// A red error box (the professor screen's server and Bluetooth problems).
 class _Notice extends StatelessWidget {
-  const _Notice(this.status);
-  final _Status status;
+  const _Notice(this.message);
+  final String message;
 
   @override
   Widget build(BuildContext context) {
-    final c = status.tone.color;
+    final c = Colors.red;
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -345,23 +319,10 @@ class _Notice extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(status.tone.icon, color: c.shade800, size: 28),
+          Icon(Icons.error_outline, color: c.shade800, size: 28),
           const SizedBox(width: 12),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  status.title,
-                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: c.shade900),
-                ),
-                if (status.detail != null)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Text(status.detail!, style: TextStyle(color: c.shade900)),
-                  ),
-              ],
-            ),
+            child: Text(message, style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: c.shade900)),
           ),
         ],
       ),
@@ -665,9 +626,9 @@ class _ProfessorScreenState extends State<ProfessorScreen> {
         if (_anchor != null)
           Padding(padding: const EdgeInsets.only(top: 12), child: _AnchorCard(anchor: _anchor!, hallRadiusM: _hallRadiusM)),
         if (_bleError != null)
-          Padding(padding: const EdgeInsets.only(top: 12), child: _Notice(_Status(_Tone.error, _bleError!))),
+          Padding(padding: const EdgeInsets.only(top: 12), child: _Notice(_bleError!)),
         if (_error != null)
-          Padding(padding: const EdgeInsets.only(top: 12), child: _Notice(_Status(_Tone.error, _error!))),
+          Padding(padding: const EdgeInsets.only(top: 12), child: _Notice(_error!)),
         const SizedBox(height: 16),
         OutlinedButton.icon(
           onPressed: _sessionId == null ? null : _refresh,
@@ -703,8 +664,110 @@ class _ProfessorScreenState extends State<ProfessorScreen> {
 }
 
 // ---------------------------------------------------------------------------
-// Student screen
+// Student screen: three visible steps (Bluetooth, Location, Submit)
 // ---------------------------------------------------------------------------
+
+enum _CheckState { idle, running, passed, failed }
+
+/// What one verification step currently shows.
+class _CheckStatus {
+  const _CheckStatus(this.state, this.headline, [this.detail]);
+  final _CheckState state;
+  final String headline;
+  final String? detail;
+}
+
+/// One step of the check-in: a numbered card with its own state and, optionally, its own button.
+class _CheckCard extends StatelessWidget {
+  const _CheckCard({
+    required this.step,
+    required this.title,
+    required this.status,
+    this.actionLabel,
+    this.onAction,
+  });
+
+  final int step;
+  final String title;
+  final _CheckStatus status;
+
+  /// Button under the details; disabled while [onAction] is null.
+  final String? actionLabel;
+  final VoidCallback? onAction;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = switch (status.state) {
+      _CheckState.idle => Colors.blueGrey,
+      _CheckState.running => Colors.indigo,
+      _CheckState.passed => Colors.green,
+      _CheckState.failed => Colors.red,
+    };
+    final Widget badge = switch (status.state) {
+      _CheckState.idle => CircleAvatar(
+          radius: 16,
+          backgroundColor: color.shade100,
+          child: Text('$step', style: TextStyle(fontWeight: FontWeight.bold, color: color.shade800)),
+        ),
+      _CheckState.running => SizedBox(
+          width: 32,
+          height: 32,
+          child: Padding(
+            padding: const EdgeInsets.all(5),
+            child: CircularProgressIndicator(strokeWidth: 3, color: color.shade700),
+          ),
+        ),
+      _CheckState.passed => Icon(Icons.check_circle, color: color.shade700, size: 32),
+      _CheckState.failed => Icon(Icons.cancel, color: color.shade700, size: 32),
+    };
+
+    return Container(
+      margin: const EdgeInsets.only(top: 10),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: color.shade50,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.shade700, width: status.state == _CheckState.idle ? 0.5 : 1.5),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              badge,
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'Step $step · $title',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: color.shade900),
+                ),
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.only(top: 8, left: 44),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(status.headline, style: TextStyle(fontWeight: FontWeight.w600, color: color.shade900)),
+                if (status.detail != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(status.detail!, style: TextStyle(fontSize: 13, color: color.shade900)),
+                  ),
+                if (actionLabel != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: OutlinedButton(onPressed: onAction, child: Text(actionLabel!)),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 class StudentScreen extends StatefulWidget {
   const StudentScreen({super.key, required this.serverUrl});
@@ -716,22 +779,57 @@ class StudentScreen extends StatefulWidget {
 }
 
 class _StudentScreenState extends State<StudentScreen> {
-  static const _weak = _Status(
-    _Tone.warning,
+  // Check results go stale quickly: the broadcast code is good for seconds, and the server accepts a
+  // GPS fix for 20 s. Whichever aged while the other check was running is refreshed before submitting.
+  static const _beaconMaxAge = Duration(seconds: 3);
+  static const _fixMaxAge = Duration(seconds: 12);
+
+  static const _bleIdle = _CheckStatus(
+    _CheckState.idle,
+    'Not checked yet',
+    'Hear the professor\'s broadcast at -75 dBm or stronger.',
+  );
+  static const _gpsIdle = _CheckStatus(
+    _CheckState.idle,
+    'Not checked yet',
+    'Two GPS fixes, compared with the professor\'s position.',
+  );
+  static const _submitIdle = _CheckStatus(
+    _CheckState.idle,
+    'Waiting for both checks',
+    'Submits automatically once Bluetooth and Location pass.',
+  );
+  static const _weak = _CheckStatus(
+    _CheckState.failed,
     'Signal Too Weak (Move Closer)',
     'The class broadcast was heard, but it is weaker than -75 dBm.',
   );
-  static const _noBroadcast = _Status(
-    _Tone.error,
+  static const _noBroadcast = _CheckStatus(
+    _CheckState.failed,
     'No Active Class Broadcast Found',
     'Make sure the professor has started the broadcast, then try again.',
   );
 
   final _name = TextEditingController();
   final _roll = TextEditingController();
-  final _ble = BleStudentService();
-  _Status? _status;
-  bool _scanning = false;
+  final _bleService = BleStudentService();
+  final _gpsService = LocationVerifierService();
+  final _stepsKey = GlobalKey();
+
+  _CheckStatus _bleCheck = _bleIdle;
+  _CheckStatus _gpsCheck = _gpsIdle;
+  _CheckStatus _submitCheck = _submitIdle;
+
+  // What the two checks collected, held only until the submission uses (or discards) it.
+  ProfessorBeacon? _beacon;
+  LocationTelemetry? _location;
+  DateTime? _locationAt;
+
+  bool get _bleOk => _bleCheck.state == _CheckState.passed;
+  bool get _gpsOk => _gpsCheck.state == _CheckState.passed;
+  bool get _submitting => _submitCheck.state == _CheckState.running;
+  bool get _anyRunning =>
+      _bleCheck.state == _CheckState.running || _gpsCheck.state == _CheckState.running || _submitting;
 
   @override
   void dispose() {
@@ -740,109 +838,280 @@ class _StudentScreenState extends State<StudentScreen> {
     super.dispose();
   }
 
-  Future<void> _scan() async {
-    final name = _name.text.trim();
-    final roll = _roll.text.trim();
-    if (name.isEmpty || roll.isEmpty) {
-      setState(() => _status = const _Status(_Tone.error, 'Enter your name and roll number first'));
-      return;
-    }
-    FocusScope.of(context).unfocus();
-    setState(() {
-      _scanning = true;
-      _status = const _Status(
-        _Tone.info,
-        'Scanning for the class broadcast and reading your location…',
-        'Keep this phone near the professor\'s phone and a window (up to 30 seconds on a cold GPS start).',
-      );
-    });
-
-    _Status result;
-    try {
-      // Read the device id and ask for every permission first, so no dialog opens mid-scan
-      // and the request follows the scan immediately.
-      final deviceId = await getDeviceMacOrHardwareId();
-      if (!await requestBlePermissions(advertise: false)) throw StateError('Bluetooth permission denied');
-      final locationService = LocationVerifierService();
-      await locationService.ensureReady();
-      // BLE scan (drops rssi < -75) and the 2-fix GPS burst run side by side.
-      // Each is settled right away so neither can fail unobserved while the other is awaited.
-      final scan = _settle(_ble.scanForSession());
-      final gps = _settle(locationService.captureVerifiedLocationBurst());
-      var (beacon, scanError) = await scan;
-      final (location, gpsError) = await gps;
-      if (scanError != null) throw scanError;
-      if (beacon == null) {
-        result = _ble.heardTooWeak ? _weak : _noBroadcast;
-      } else {
-        if (gpsError != null) throw gpsError;
-        // The broadcast code is only good for a few seconds: if the GPS burst outlasted it, read it again.
-        if (DateTime.now().difference(beacon.heardAt) > const Duration(seconds: 3)) {
-          beacon = await _ble.scanForSession() ?? beacon;
-        }
-        final marked = await AttendanceApi(widget.serverUrl.text).markAttendance(
-          sessionId: beacon.sessionId,
-          rollNo: roll,
-          name: name,
-          rollingCode: beacon.rollingCode,
-          rssi: beacon.rssi,
-          deviceId: deviceId,
-          location: location!,
-        );
-        result = _Status(
-          _Tone.success,
-          'Attendance Marked Verified!',
-          '${marked.alreadyMarked ? 'Roll no $roll was already marked for this class.' : '$name ($roll) is marked present.'}\n'
-          '${gpsSummary(marked.distanceM, marked.allowedRadiusM)}',
-        );
-      }
-    } on ApiException catch (e) {
-      result = _fromApi(e);
-    } catch (e) {
-      result = _Status(_Tone.error, describeError(e));
-    }
+  void _set({_CheckStatus? ble, _CheckStatus? gps, _CheckStatus? submit}) {
     if (!mounted) return;
     setState(() {
-      _scanning = false;
-      _status = result;
+      if (ble != null) _bleCheck = ble;
+      if (gps != null) _gpsCheck = gps;
+      if (submit != null) _submitCheck = submit;
     });
   }
 
-  _Status _fromApi(ApiException e) {
-    final msg = e.message;
-    if (e.status == 403 && msg.contains('weak')) return _weak;
-    if (e.status == 403 && msg.startsWith('Location authenticity')) {
-      final reasons = e.body['spoof_reasons'];
-      return _Status(
-        _Tone.error,
-        'Location Check Failed',
-        'Rejected because: ${reasons is List ? reasons.join(', ') : 'unknown reason'}',
-      );
+  /// Scrolls the three step cards to the top of the screen so all of them are in view while a check runs.
+  void _showSteps() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final steps = _stepsKey.currentContext;
+      if (steps != null && steps.mounted) {
+        Scrollable.ensureVisible(steps, duration: const Duration(milliseconds: 300), alignment: 0.0);
+      }
+    });
+  }
+
+  bool _identityOk() {
+    if (_name.text.trim().isNotEmpty && _roll.text.trim().isNotEmpty) return true;
+    _set(
+      submit: const _CheckStatus(
+        _CheckState.failed,
+        'Enter your name and roll number',
+        'Attendance needs both before it can be submitted.',
+      ),
+    );
+    return false;
+  }
+
+  /// A finished submission means the next check starts a new attempt: forget the old one.
+  void _resetIfDone() {
+    if (_submitCheck.state != _CheckState.passed) return;
+    _beacon = null;
+    _location = null;
+    _set(ble: _bleIdle, gps: _gpsIdle, submit: _submitIdle);
+  }
+
+  /// Runs both checks side by side, after asking for every permission up front so no dialog opens
+  /// in the middle of the timed scan. Submits by itself once both pass.
+  Future<void> _verifyBoth() async {
+    if (!_identityOk()) return;
+    FocusScope.of(context).unfocus();
+    _beacon = null;
+    _location = null;
+    const getting = _CheckStatus(_CheckState.running, 'Getting ready…');
+    _set(ble: getting, gps: getting, submit: _submitIdle);
+    _showSteps();
+
+    String? bleBlock;
+    String? gpsBlock;
+    try {
+      if (!await requestBlePermissions(advertise: false)) bleBlock = 'Bluetooth permission denied.';
+    } catch (e) {
+      bleBlock = describeError(e);
     }
-    if (e.status == 403 && msg.startsWith('Outside lecture hall')) {
+    try {
+      await _gpsService.ensureReady();
+    } catch (e) {
+      gpsBlock = describeError(e);
+    }
+
+    final runs = <Future<void>>[];
+    if (bleBlock != null) {
+      _set(ble: _CheckStatus(_CheckState.failed, 'Bluetooth unavailable', bleBlock));
+    } else {
+      runs.add(_verifyBluetooth());
+    }
+    if (gpsBlock != null) {
+      _set(gps: _CheckStatus(_CheckState.failed, 'Location unavailable', gpsBlock));
+    } else {
+      runs.add(_verifyLocation());
+    }
+    await Future.wait(runs);
+  }
+
+  /// Step 1: the professor's broadcast must be heard at -75 dBm or stronger.
+  Future<void> _verifyBluetooth() async {
+    _resetIfDone();
+    _showSteps();
+    _set(
+      ble: const _CheckStatus(
+        _CheckState.running,
+        'Scanning for the class broadcast…',
+        'Hold this phone near the professor\'s phone (up to 6 seconds).',
+      ),
+    );
+    try {
+      final beacon = await _bleService.scanForSession();
+      if (beacon == null) {
+        _set(ble: _bleService.heardTooWeak ? _weak : _noBroadcast);
+        return;
+      }
+      _beacon = beacon;
+      _set(
+        ble: _CheckStatus(
+          _CheckState.passed,
+          'Class broadcast heard',
+          'Session ${beacon.sessionId} at ${beacon.rssi} dBm (needs -75 dBm or stronger).',
+        ),
+      );
+    } catch (e) {
+      _set(ble: _CheckStatus(_CheckState.failed, 'Bluetooth check failed', describeError(e)));
+      return;
+    }
+    await _maybeSubmit();
+  }
+
+  /// Step 2: two GPS fixes. The server compares them with the professor's position on submit.
+  Future<void> _verifyLocation() async {
+    _resetIfDone();
+    _showSteps();
+    _set(
+      gps: const _CheckStatus(
+        _CheckState.running,
+        'Reading your location…',
+        'Two high-accuracy GPS fixes. Near a window this takes a few seconds; a cold GPS start can take up to 30.',
+      ),
+    );
+    try {
+      final location = await _gpsService.captureVerifiedLocationBurst();
+      if (location.isMocked) {
+        _set(
+          gps: const _CheckStatus(
+            _CheckState.failed,
+            'Mock location detected',
+            'Switch off any fake-GPS app or the mock location setting in Developer options, then try again.',
+          ),
+        );
+        return;
+      }
+      _location = location;
+      _locationAt = DateTime.now();
+      _set(
+        gps: _CheckStatus(
+          _CheckState.passed,
+          'Location captured',
+          '±${location.accuracy.toStringAsFixed(1)}m accuracy · '
+              '${location.sampleCount == 2 ? 'two fixes' : 'one fix (the second timed out)'}'
+              '${location.wifiBssid != null ? ' · Wi-Fi AP noted' : ''} · checked against the professor on submit',
+        ),
+      );
+    } catch (e) {
+      _set(gps: _CheckStatus(_CheckState.failed, 'Location check failed', describeError(e)));
+      return;
+    }
+    await _maybeSubmit();
+  }
+
+  /// Step 3 fires on its own the moment both checks have passed.
+  Future<void> _maybeSubmit() async {
+    if (_bleOk && _gpsOk && !_submitting) await _submit();
+  }
+
+  Future<void> _submit() async {
+    if (!_identityOk()) return;
+    final name = _name.text.trim();
+    final roll = _roll.text.trim();
+    _set(
+      submit: const _CheckStatus(
+        _CheckState.running,
+        'Submitting attendance…',
+        'Sending the broadcast code, signal strength, device ID and location to the server.',
+      ),
+    );
+    try {
+      var location = _location!;
+      if (DateTime.now().difference(_locationAt!) > _fixMaxAge) {
+        location = await _gpsService.captureVerifiedLocationBurst();
+        _location = location;
+        _locationAt = DateTime.now();
+      }
+      var beacon = _beacon!;
+      if (DateTime.now().difference(beacon.heardAt) > _beaconMaxAge) {
+        beacon = await _bleService.scanForSession() ?? beacon;
+        _beacon = beacon;
+      }
+      final marked = await AttendanceApi(widget.serverUrl.text).markAttendance(
+        sessionId: beacon.sessionId,
+        rollNo: roll,
+        name: name,
+        rollingCode: beacon.rollingCode,
+        rssi: beacon.rssi,
+        deviceId: await getDeviceMacOrHardwareId(),
+        location: location,
+      );
+      _beacon = null;
+      _location = null;
+      _set(
+        ble: _CheckStatus(
+          _CheckState.passed,
+          'Bluetooth verified',
+          'Session ${beacon.sessionId} at ${beacon.rssi} dBm · broadcast code accepted by the server.',
+        ),
+        gps: _CheckStatus(_CheckState.passed, 'Location verified', gpsSummary(marked.distanceM, marked.allowedRadiusM)),
+        submit: _CheckStatus(
+          _CheckState.passed,
+          'Attendance Marked Verified!',
+          marked.alreadyMarked ? 'Roll no $roll was already marked for this class.' : '$name ($roll) is marked present.',
+        ),
+      );
+    } on ApiException catch (e) {
+      _applyRejection(e);
+    } catch (e) {
+      _set(submit: _CheckStatus(_CheckState.failed, 'Could not submit', describeError(e)));
+    }
+  }
+
+  /// The server's verdict, put on the card of the check that caused it. The other check keeps its
+  /// result, so fixing the failed one is enough: attendance then submits again by itself.
+  void _applyRejection(ApiException e) {
+    final msg = e.message;
+    _CheckStatus notSubmitted(String check) => _CheckStatus(
+          _CheckState.failed,
+          'Not submitted',
+          'The server rejected the $check check. Fix it and attendance submits automatically.',
+        );
+
+    if (e.status == 403 && msg.contains('weak')) {
+      _beacon = null;
+      _set(ble: _weak, submit: notSubmitted('Bluetooth'));
+    } else if (e.status == 403 && msg.startsWith('Location authenticity')) {
+      final reasons = e.body['spoof_reasons'];
+      _location = null;
+      _set(
+        gps: _CheckStatus(
+          _CheckState.failed,
+          'Location Check Failed',
+          'Rejected because: ${reasons is List ? reasons.join(', ') : 'unknown reason'}',
+        ),
+        submit: notSubmitted('Location'),
+      );
+    } else if (e.status == 403 && msg.startsWith('Outside lecture hall')) {
       final d = (e.body['distance_m'] as num?)?.toStringAsFixed(1);
       final bound = (e.body['allowed_radius_m'] as num?)?.toStringAsFixed(1);
-      return _Status(
-        _Tone.error,
-        'Outside Lecture Hall Boundary',
-        'You are ${d ?? '?'}m from the professor; the allowed radius is ${bound ?? '?'}m.',
+      _location = null;
+      _set(
+        gps: _CheckStatus(
+          _CheckState.failed,
+          'Outside Lecture Hall Boundary',
+          'You are ${d ?? '?'}m from the professor; the allowed radius is ${bound ?? '?'}m.',
+        ),
+        submit: notSubmitted('Location'),
       );
-    }
-    if ((e.status == 403 && msg.contains('not active')) || e.status == 404) {
-      return _Status(_Tone.error, 'No Active Class Broadcast Found', msg);
-    }
-    if (e.status == 401) {
-      return const _Status(
-        _Tone.warning,
-        'Code Expired, Scan Again',
-        'The broadcast code changed before it reached the server.',
+    } else if ((e.status == 403 && msg.contains('not active')) || e.status == 404) {
+      _beacon = null;
+      _set(ble: _CheckStatus(_CheckState.failed, 'No Active Class Broadcast Found', msg), submit: notSubmitted('Bluetooth'));
+    } else if (e.status == 401) {
+      _beacon = null;
+      _set(
+        ble: const _CheckStatus(
+          _CheckState.failed,
+          'Broadcast code expired',
+          'The code changed before it reached the server. Verify Bluetooth again.',
+        ),
+        submit: notSubmitted('Bluetooth'),
       );
+    } else {
+      _set(submit: _CheckStatus(_CheckState.failed, 'Could not submit', msg));
     }
-    return _Status(_Tone.error, e.message);
   }
+
+  /// Button text for a check's own action: Verify, Re-check or Retry.
+  String _actionLabel(_CheckStatus s, String what) => switch (s.state) {
+        _CheckState.idle => 'Verify $what',
+        _CheckState.running => 'Checking…',
+        _CheckState.passed => 'Re-check $what',
+        _CheckState.failed => 'Retry $what',
+      };
 
   @override
   Widget build(BuildContext context) {
+    final canRetrySubmit = _submitCheck.state == _CheckState.failed && _bleOk && _gpsOk;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
@@ -871,18 +1140,38 @@ class _StudentScreenState extends State<StudentScreen> {
           height: 64,
           child: FilledButton.icon(
             style: FilledButton.styleFrom(textStyle: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
-            onPressed: _scanning ? null : _scan,
-            icon: _scanning
-                ? const SizedBox(
-                    width: 22,
-                    height: 22,
-                    child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white),
-                  )
-                : const Icon(Icons.bluetooth_searching, size: 28),
-            label: Text(_scanning ? 'Scanning…' : 'Scan & Mark Attendance'),
+            onPressed: _anyRunning ? null : _verifyBoth,
+            icon: const Icon(Icons.verified_user, size: 28),
+            label: const Text('Verify Both & Mark Attendance'),
           ),
         ),
-        if (_status != null) Padding(padding: const EdgeInsets.only(top: 16), child: _Notice(_status!)),
+        Column(
+          key: _stepsKey,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _CheckCard(
+              step: 1,
+              title: 'Bluetooth proximity',
+              status: _bleCheck,
+              actionLabel: _actionLabel(_bleCheck, 'Bluetooth'),
+              onAction: _bleCheck.state == _CheckState.running || _submitting ? null : _verifyBluetooth,
+            ),
+            _CheckCard(
+              step: 2,
+              title: 'Location',
+              status: _gpsCheck,
+              actionLabel: _actionLabel(_gpsCheck, 'Location'),
+              onAction: _gpsCheck.state == _CheckState.running || _submitting ? null : _verifyLocation,
+            ),
+            _CheckCard(
+              step: 3,
+              title: 'Attendance submission',
+              status: _submitCheck,
+              actionLabel: canRetrySubmit ? 'Retry submit' : null,
+              onAction: canRetrySubmit ? _submit : null,
+            ),
+          ],
+        ),
       ],
     );
   }
