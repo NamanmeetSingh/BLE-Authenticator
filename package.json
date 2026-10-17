@@ -5,7 +5,8 @@
   "description": "Phase 1 BLE classroom attendance MVP backend",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "tunnel": "cloudflared tunnel --url http://localhost:3000"
   },
   "engines": {
     "node": ">=20"

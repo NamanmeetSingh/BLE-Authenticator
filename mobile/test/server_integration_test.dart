@@ -9,10 +9,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 
 /// Runs the professor and student protocol, including the location verification, against a live
-/// server (everything except the BLE radio and the real GPS chip). Start the server, then:
-///   ATTENDANCE_SERVER=http://127.0.0.1:3000 flutter test test/server_integration_test.dart
+/// server (everything except the BLE radio and the real GPS chip). Start the server with a known token
+/// (it prints one when it starts), then:
+///   `ATTENDANCE_SERVER=http://127.0.0.1:3000 ATTENDANCE_TOKEN=TOKEN flutter test test/server_integration_test.dart`
 void main() {
   final url = Platform.environment['ATTENDANCE_SERVER'];
+  final token = Platform.environment['ATTENDANCE_TOKEN'];
 
   const profLat = 28.6139; // _loc() defaults to this latitude and longitude 77.2090
   const profSigma = 8.3;
@@ -28,11 +30,36 @@ void main() {
     late _Session hall;
 
     setUpAll(() async {
-      api = AttendanceApi(url!);
+      api = AttendanceApi(url!, token: token!);
       hall = await _Session.start(api, _loc(accuracy: profSigma));
     });
 
     tearDownAll(() async => api.stopSession(hall.id));
+
+    test('the access token gates every /api call, before any payload is looked at', () async {
+      await api.ping(); // the right token is accepted
+
+      final base = Uri.parse(url!);
+      final none = await http.get(base.resolve('/api/ping'));
+      expect(none.statusCode, 401);
+      expect(none.headers['www-authenticate'], 'Bearer');
+      await expectLater(
+        AttendanceApi(url, token: 'definitely-not-the-token').ping(),
+        throwsA(isA<ApiException>().having((e) => e.isAuthFailure, 'isAuthFailure', isTrue)),
+      );
+      await expectLater(
+        AttendanceApi(url).startSession(location: _loc()),
+        throwsA(isA<ApiException>().having((e) => e.isAuthFailure, 'isAuthFailure', isTrue)),
+      );
+
+      // garbage without a token is a plain 401 (nothing about the payload is revealed); with it, a 400
+      final withoutToken = await http.post(base.resolve('/api/session/start'),
+          headers: {'Content-Type': 'application/json'}, body: '{not json');
+      expect(withoutToken.statusCode, 401);
+      final withToken = await http.post(base.resolve('/api/session/start'),
+          headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'}, body: '{not json');
+      expect(withToken.statusCode, 400);
+    });
 
     test('protocol: start returns the seed and the default hall radius', () {
       expect(hall.id, matches(RegExp(r'^[0-9A-F]{4}$')));
@@ -134,10 +161,10 @@ void main() {
     test('missing location is a 400 for both the professor and the student', () async {
       final base = Uri.parse(url!);
       final start = await http.post(base.resolve('/api/session/start'),
-          headers: {'Content-Type': 'application/json'}, body: '{}');
+          headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'}, body: '{}');
       expect(start.statusCode, 400);
       final mark = await http.post(base.resolve('/api/attendance/mark'),
-          headers: {'Content-Type': 'application/json'},
+          headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'},
           body: jsonEncode({
             'session_id': hall.id,
             'student_roll_no': 'M1',
@@ -167,7 +194,7 @@ void main() {
       expect(rolls, isNot(contains('C1')));
       expect(rolls, isNot(contains('D1')));
     });
-  }, skip: url == null ? 'set ATTENDANCE_SERVER=http://127.0.0.1:3000 to run against a live server' : false);
+  }, skip: url == null || token == null ? 'set ATTENDANCE_SERVER and ATTENDANCE_TOKEN to run against a live server' : false);
 }
 
 /// A telemetry sample with realistic defaults: fractional accuracy, real 3D data and a little jitter,

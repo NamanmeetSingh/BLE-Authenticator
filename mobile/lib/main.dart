@@ -4,14 +4,25 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show PlatformException;
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import 'ble_common.dart';
 import 'ble_professor_service.dart';
 import 'ble_student_service.dart';
 import 'location_verifier_service.dart';
 
-/// Reachable from a USB-connected phone after `adb reverse tcp:3000 tcp:3000`.
-const _defaultServerUrl = 'http://127.0.0.1:3000';
+/// Starting values for the config bar, baked in at build time:
+///   `flutter build apk --dart-define=SERVER_URL=https://NAME.trycloudflare.com --dart-define=ACCESS_TOKEN=TOKEN`
+/// Both stay editable on the phone and are remembered, because a quick-tunnel URL changes every time
+/// cloudflared restarts. The default URL works over USB after `adb reverse tcp:3000 tcp:3000`.
+const _defaultServerUrl = String.fromEnvironment('SERVER_URL', defaultValue: 'http://127.0.0.1:3000');
+const _defaultAccessToken = String.fromEnvironment('ACCESS_TOKEN');
+const _urlKey = 'server_url';
+const _tokenKey = 'access_token';
+
+/// This machine or this network: the places a plain-http server is normal (USB reverse, LAN).
+final _localAddress = RegExp(r'^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)');
+final _loopback = RegExp(r'^(localhost|127\.)');
 
 void main() => runApp(const AttendanceApp());
 
@@ -29,33 +40,47 @@ class ApiException implements Exception {
   /// The server's JSON error body (e.g. spoof_reasons, distance_m, allowed_radius_m).
   final Map<String, dynamic> body;
 
+  /// The access token was missing or wrong (as opposed to the 401 for an expired rolling code).
+  bool get isAuthFailure => status == 401 && message == AttendanceApi.authError;
+
   @override
   String toString() => message;
 }
 
 class AttendanceApi {
-  AttendanceApi(String baseUrl) : _base = _parse(baseUrl);
+  AttendanceApi(String baseUrl, {this.token = ''}) : _base = parseBaseUrl(baseUrl);
+
+  /// The server's message for a missing or wrong access token (see server.js).
+  static const authError = 'missing or invalid access token';
 
   final Uri _base;
+
+  /// Sent as `Authorization: Bearer TOKEN` on every call.
+  final String token;
   static const _timeout = Duration(seconds: 5);
 
-  static Uri _parse(String raw) {
+  /// Adds a scheme when there is none: http for local addresses (USB, LAN), https for anything else,
+  /// so a pasted tunnel hostname never sends the access token in clear text.
+  static Uri parseBaseUrl(String raw) {
     final s = raw.trim();
-    return Uri.parse(s.contains('://') ? s : 'http://$s');
+    if (s.contains('://')) return Uri.parse(s);
+    return Uri.parse('${_localAddress.hasMatch(s) ? 'http' : 'https'}://$s');
   }
+
+  Map<String, String> get _auth => {if (token.trim().isNotEmpty) 'Authorization': 'Bearer ${token.trim()}'};
 
   ApiException get _unreachable => ApiException(
         0,
-        'Cannot reach the server at $_base. Check that it is running and the URL is right '
-        '(USB phones need "adb reverse tcp:3000 tcp:3000").',
+        'Cannot reach the server at $_base. Check that the server and the tunnel are running and the URL is '
+        'current (a quick-tunnel URL changes every time cloudflared restarts).',
       );
 
   Future<Map<String, dynamic>> _call(String method, String path, [Map<String, Object?>? body]) async {
     final uri = _base.resolve(path);
     try {
       final request = method == 'GET'
-          ? http.get(uri)
-          : http.post(uri, headers: {'Content-Type': 'application/json'}, body: jsonEncode(body ?? {}));
+          ? http.get(uri, headers: _auth)
+          : http.post(uri, headers: {..._auth, 'Content-Type': 'application/json'}, body: jsonEncode(body ?? {}));
       final res = await request.timeout(_timeout);
       final decoded = _tryDecode(res.body);
       final data = decoded is Map<String, dynamic> ? decoded : <String, dynamic>{};
@@ -77,6 +102,9 @@ class AttendanceApi {
       return null;
     }
   }
+
+  /// GET /api/ping: the server is reachable and the access token was accepted.
+  Future<void> ping() => _call('GET', '/api/ping');
 
   /// POST /api/session/start. [location] is the professor's anchor; [hallRadiusM] overrides the
   /// server's default hall radius (30 m).
@@ -187,9 +215,12 @@ String gpsSummary(double distanceM, double boundM) =>
     'Distance: ${distanceM.toStringAsFixed(1)}m (Bound: ${boundM.toStringAsFixed(1)}m) • GPS Verified';
 
 String describeError(Object e) => switch (e) {
+      ApiException ex when ex.isAuthFailure =>
+        'The server rejected the access token. Check the Access Token field at the top.',
       ApiException() => e.body['spoof_reasons'] is List
           ? '${e.message}: ${(e.body['spoof_reasons'] as List).join(', ')}'
           : e.message,
+      FormatException() => 'That server URL is not valid.',
       StateError() => e.message,
       UnsupportedError() => e.message ?? 'Not supported on this device',
       PlatformException() => e.message ?? e.code,
@@ -199,6 +230,60 @@ String describeError(Object e) => switch (e) {
 // ---------------------------------------------------------------------------
 // App + home screen (configuration bar)
 // ---------------------------------------------------------------------------
+
+/// The server address and access token, shared by both screens. Edits apply to the next request and
+/// are remembered across app restarts.
+class ServerConfig {
+  ServerConfig()
+      : url = TextEditingController(text: _defaultServerUrl),
+        token = TextEditingController(text: _defaultAccessToken);
+
+  final TextEditingController url;
+  final TextEditingController token;
+
+  /// A client for the server as configured right now.
+  AttendanceApi api() => AttendanceApi(url.text, token: token.text);
+
+  /// Loads what was saved last time, then saves every edit. A saved value wins over the build-time default.
+  Future<void> restoreAndRemember() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      url.text = prefs.getString(_urlKey) ?? url.text;
+      token.text = prefs.getString(_tokenKey) ?? token.text;
+      _remember(url, _urlKey, prefs);
+      _remember(token, _tokenKey, prefs);
+    } catch (_) {
+      // storage unavailable: the fields still work, they just are not remembered
+    }
+  }
+
+  static void _remember(TextEditingController c, String key, SharedPreferences prefs) {
+    var saved = c.text;
+    c.addListener(() {
+      if (c.text == saved) return; // cursor moves notify too
+      saved = c.text;
+      prefs.setString(key, saved);
+    });
+  }
+
+  void dispose() {
+    url.dispose();
+    token.dispose();
+  }
+}
+
+/// A warning when the access token would cross a network in clear text (plain http to anything but
+/// this phone itself), or null.
+String? plainHttpWarning(String raw) {
+  final Uri url;
+  try {
+    url = AttendanceApi.parseBaseUrl(raw);
+  } on FormatException {
+    return null;
+  }
+  if (url.scheme != 'http' || _loopback.hasMatch(url.host)) return null;
+  return 'Plain http: the access token is sent unencrypted. Use the https tunnel URL.';
+}
 
 class AttendanceApp extends StatelessWidget {
   const AttendanceApp({super.key});
@@ -222,17 +307,45 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  final _serverUrl = TextEditingController(text: _defaultServerUrl);
+  final _config = ServerConfig();
   bool _professor = false;
+  bool _showToken = false;
+  bool _testing = false;
+  ({bool ok, String message})? _connection; // result of the last "Test connection"
 
   /// True while the professor screen is starting or broadcasting: the role can't change then,
   /// otherwise the screen would be disposed with a live session and BLE advertisement.
   bool _locked = false;
 
   @override
+  void initState() {
+    super.initState();
+    unawaited(_config.restoreAndRemember());
+  }
+
+  @override
   void dispose() {
-    _serverUrl.dispose();
+    _config.dispose();
     super.dispose();
+  }
+
+  Future<void> _testConnection() async {
+    setState(() {
+      _testing = true;
+      _connection = null;
+    });
+    ({bool ok, String message}) result;
+    try {
+      await _config.api().ping();
+      result = (ok: true, message: 'Connected: the server answered and accepted the access token.');
+    } catch (e) {
+      result = (ok: false, message: describeError(e));
+    }
+    if (!mounted) return;
+    setState(() {
+      _testing = false;
+      _connection = result;
+    });
   }
 
   @override
@@ -249,17 +362,83 @@ class _HomeScreenState extends State<HomeScreen> {
                 child: Column(
                   children: [
                     TextField(
-                      controller: _serverUrl,
+                      controller: _config.url,
                       keyboardType: TextInputType.url,
                       autocorrect: false,
                       enableSuggestions: false,
                       decoration: const InputDecoration(
                         labelText: 'Backend Server URL',
-                        helperText: 'USB: http://127.0.0.1:3000 (adb reverse)   Wi-Fi: http://192.168.1.X:3000',
+                        helperText: 'Tunnel: https://<name>.trycloudflare.com   USB: http://127.0.0.1:3000',
                         helperMaxLines: 2,
                         border: OutlineInputBorder(),
                       ),
                     ),
+                    ListenableBuilder(
+                      listenable: _config.url,
+                      builder: (context, _) {
+                        final warning = plainHttpWarning(_config.url.text);
+                        return warning == null
+                            ? const SizedBox.shrink()
+                            : Padding(
+                                padding: const EdgeInsets.only(top: 6),
+                                child: Text(warning, style: TextStyle(fontSize: 12, color: Colors.orange.shade900)),
+                              );
+                      },
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _config.token,
+                      obscureText: !_showToken,
+                      autocorrect: false,
+                      enableSuggestions: false,
+                      decoration: InputDecoration(
+                        labelText: 'Access Token',
+                        helperText: 'Printed by the server when it starts (ACCESS_TOKEN)',
+                        border: const OutlineInputBorder(),
+                        suffixIcon: IconButton(
+                          tooltip: _showToken ? 'Hide token' : 'Show token',
+                          icon: Icon(_showToken ? Icons.visibility_off : Icons.visibility),
+                          onPressed: () => setState(() => _showToken = !_showToken),
+                        ),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: OutlinedButton.icon(
+                          onPressed: _testing ? null : _testConnection,
+                          icon: _testing
+                              ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
+                              : const Icon(Icons.wifi_tethering),
+                          label: const Text('Test connection'),
+                        ),
+                      ),
+                    ),
+                    if (_connection != null)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 6),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Icon(
+                              _connection!.ok ? Icons.check_circle : Icons.error_outline,
+                              size: 18,
+                              color: _connection!.ok ? Colors.green.shade700 : Colors.red.shade700,
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                _connection!.message,
+                                style: TextStyle(
+                                  fontSize: 13,
+                                  color: _connection!.ok ? Colors.green.shade800 : Colors.red.shade800,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,
                       title: Text(
@@ -283,13 +462,13 @@ class _HomeScreenState extends State<HomeScreen> {
             const SizedBox(height: 16),
             if (_professor)
               ProfessorScreen(
-                serverUrl: _serverUrl,
+                config: _config,
                 onLockChanged: (locked) {
                   if (locked != _locked) setState(() => _locked = locked);
                 },
               )
             else
-              StudentScreen(serverUrl: _serverUrl),
+              StudentScreen(config: _config),
           ],
         ),
       ),
@@ -444,9 +623,9 @@ class _AnchorCard extends StatelessWidget {
 // ---------------------------------------------------------------------------
 
 class ProfessorScreen extends StatefulWidget {
-  const ProfessorScreen({super.key, required this.serverUrl, required this.onLockChanged});
+  const ProfessorScreen({super.key, required this.config, required this.onLockChanged});
 
-  final TextEditingController serverUrl;
+  final ServerConfig config;
 
   /// true while a session is starting or live (the role switch must stay put).
   final ValueChanged<bool> onLockChanged;
@@ -501,7 +680,7 @@ class _ProfessorScreenState extends State<ProfessorScreen> {
     AttendanceApi? api;
     String? startedId;
     try {
-      api = AttendanceApi(widget.serverUrl.text);
+      api = widget.config.api();
       final anchor = await LocationVerifierService().captureVerifiedLocationBurst();
       _update(() => _phase = 'Starting the session…');
       final s = await api.startSession(location: anchor);
@@ -770,9 +949,9 @@ class _CheckCard extends StatelessWidget {
 }
 
 class StudentScreen extends StatefulWidget {
-  const StudentScreen({super.key, required this.serverUrl});
+  const StudentScreen({super.key, required this.config});
 
-  final TextEditingController serverUrl;
+  final ServerConfig config;
 
   @override
   State<StudentScreen> createState() => _StudentScreenState();
@@ -1016,7 +1195,7 @@ class _StudentScreenState extends State<StudentScreen> {
         beacon = await _bleService.scanForSession() ?? beacon;
         _beacon = beacon;
       }
-      final marked = await AttendanceApi(widget.serverUrl.text).markAttendance(
+      final marked = await widget.config.api().markAttendance(
         sessionId: beacon.sessionId,
         rollNo: roll,
         name: name,
@@ -1057,7 +1236,10 @@ class _StudentScreenState extends State<StudentScreen> {
           'The server rejected the $check check. Fix it and attendance submits automatically.',
         );
 
-    if (e.status == 403 && msg.contains('weak')) {
+    if (e.isAuthFailure) {
+      // not an expired rolling code (also a 401): the access token in the top bar is wrong
+      _set(submit: _CheckStatus(_CheckState.failed, 'Access token rejected', describeError(e)));
+    } else if (e.status == 403 && msg.contains('weak')) {
       _beacon = null;
       _set(ble: _weak, submit: notSubmitted('Bluetooth'));
     } else if (e.status == 403 && msg.startsWith('Location authenticity')) {

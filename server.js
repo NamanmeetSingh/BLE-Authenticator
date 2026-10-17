@@ -8,6 +8,18 @@ const STEP_MS = 5000; // rolling-code window
 const HALL_RADIUS_DEFAULT_M = 30.0;
 const SIGMA_CLAMP_M = 50.0; // a huge combined GPS uncertainty must not widen the geofence without limit
 
+// Every /api call needs this bearer token, so a public tunnel URL (it ends up on screens, in logs and in
+// demos) is not an open door. Set ACCESS_TOKEN to keep one token across restarts; otherwise one is
+// generated for this run and printed at startup.
+const MIN_TOKEN_LENGTH = 16;
+if (process.env.ACCESS_TOKEN && process.env.ACCESS_TOKEN.length < MIN_TOKEN_LENGTH) {
+  console.error(`ACCESS_TOKEN must be at least ${MIN_TOKEN_LENGTH} characters: the tunnel URL is public.`);
+  process.exit(1);
+}
+const TOKEN_GENERATED = !process.env.ACCESS_TOKEN;
+const ACCESS_TOKEN = process.env.ACCESS_TOKEN || crypto.randomBytes(24).toString('base64url'); // 32 chars
+const tokenDigest = crypto.createHash('sha256').update(ACCESS_TOKEN).digest();
+
 // DB_FILE=:memory: gives a throwaway database
 const db = new Database(process.env.DB_FILE || 'attendance.db');
 db.exec(`
@@ -210,12 +222,26 @@ function createSession(location, hall_radius_m) {
 const text = (v) => (typeof v === 'string' || typeof v === 'number' ? String(v).trim() : '');
 
 const app = express();
-app.use(express.json());
-// one line per request: method, path, status (bodies are never logged: they carry rolling codes and coordinates)
+// one line per request: method, path, status (bodies and headers are never logged: they carry rolling
+// codes, coordinates and the access token)
 app.use((req, res, next) => {
   res.on('finish', () => console.log(`${new Date().toISOString()} ${req.method} ${req.originalUrl} -> ${res.statusCode}`));
   next();
 });
+
+// Token check first, before any body is parsed: an unauthenticated caller learns nothing, not even
+// whether its payload was valid. Hashing both sides makes the comparison constant-time for any length.
+app.use('/api', (req, res, next) => {
+  const bearer = /^Bearer\s+(.+)$/i.exec(req.get('authorization') || '');
+  const given = crypto.createHash('sha256').update(bearer ? bearer[1].trim() : '').digest();
+  if (crypto.timingSafeEqual(given, tokenDigest)) return next();
+  res.set('WWW-Authenticate', 'Bearer').status(401).json({ error: 'missing or invalid access token' });
+});
+
+app.use(express.json());
+
+// The app's "Test connection" button: reachable, and the token was accepted.
+app.get('/api/ping', (req, res) => res.json({ ok: true }));
 
 app.post('/api/session/start', (req, res) => {
   const b = req.body || {};
@@ -347,4 +373,13 @@ app.use((err, req, res, next) => {
   res.status(err.status || 500).json({ error: err.status ? err.message : 'internal error' });
 });
 
-app.listen(PORT, () => console.log(`BLE attendance server on http://localhost:${PORT}`));
+app.listen(PORT, () => {
+  console.log(`BLE attendance server on http://localhost:${PORT}`);
+  console.log(
+    TOKEN_GENERATED
+      ? `Access token (generated for this run): ${ACCESS_TOKEN}\n  Set ACCESS_TOKEN to keep the same token across restarts.`
+      : `Access token: taken from ACCESS_TOKEN (${ACCESS_TOKEN.length} characters)`,
+  );
+  console.log(`Demo without USB: in a second terminal run  cloudflared tunnel --url http://localhost:${PORT}`);
+  console.log('  then enter the https://<name>.trycloudflare.com URL and the access token in the app.');
+});

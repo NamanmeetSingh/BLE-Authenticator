@@ -30,8 +30,9 @@
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true">
-        <!-- usesCleartextTraffic: the Phase 1 server is plain http on the LAN.
-             Remove once the server sits behind https. -->
+        <!-- usesCleartextTraffic: only for development against http://127.0.0.1 (adb reverse) or a LAN IP.
+             The Cloudflare tunnel is https and needs none of this; the app warns when the access token
+             would go over plain http. Remove it for a release build. -->
         <activity
             android:name=".MainActivity"
             android:exported="true"

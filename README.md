@@ -81,13 +81,19 @@ BLE-Authenticator/
 * Two physical mobile devices with Bluetooth Low Energy (BLE) hardware support
 
 ### 1. Start the Verification Server
-From the root directory, install dependencies and launch the local authentication server:
+From the root directory, install dependencies and launch the authentication server:
 
 ```bash
 npm install
-node server.js
+npm start
 ```
 The server initializes the SQLite database (`attendance.db`) and listens on `http://localhost:3000`.
+
+Every `/api` call needs an **access token** (`Authorization: Bearer <token>`), so the server is never open just because its URL is public. The server prints a generated token when it starts; set your own (16+ characters) with `ACCESS_TOKEN` to keep the same one across restarts:
+
+```powershell
+$env:ACCESS_TOKEN = "a-long-random-demo-token"; npm start
+```
 
 ### 2. Build & Run the Mobile Client
 In a separate terminal, navigate to the `mobile/` directory and fetch the Flutter packages:
@@ -97,16 +103,34 @@ cd mobile
 flutter pub get
 flutter run
 ```
+Enter the **Backend Server URL** and **Access Token** in the app's top bar and tap **Test connection**. Both are remembered between launches. To start with them pre-filled instead, build with `--dart-define=SERVER_URL=https://<name>.trycloudflare.com --dart-define=ACCESS_TOKEN=<token>` (note that this bakes the token into the APK).
+
+---
+
+## Demo Without USB: Cloudflare Quick Tunnel
+
+A [quick tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/trycloudflare/) gives the laptop a temporary public `https://<name>.trycloudflare.com` address with no Cloudflare account, so the phones only need internet access (Wi-Fi or mobile data), not a cable. BLE still runs over the air between the phones.
+
+1. Install [`cloudflared`](https://developers.cloudflare.com/tunnel/downloads/) once.
+2. Start the server with a known token (see above).
+3. In a second terminal run `npm run tunnel` and copy the `https://….trycloudflare.com` URL it prints.
+4. On **both** phones paste that URL and the token into the top bar and tap **Test connection** until it says *Connected*.
+5. Run the demo as usual. Stop `cloudflared` when you are done: the URL stops working for everyone.
+
+Things to know: the hostname **changes every time `cloudflared` restarts** (paste the new one; the token stays the same if you set `ACCESS_TOKEN`), quick tunnels have no uptime guarantee, and Cloudflare's email-login option is not usable here because it needs an interactive browser, which is why the API uses the bearer token. The app warns when the URL is plain `http` to anything other than the phone itself, since the token would then travel unencrypted.
 
 ---
 
 ## REST API Reference
 
+All endpoints require the header `Authorization: Bearer <access token>`; without it the server answers `401 {"error":"missing or invalid access token"}` before looking at the request.
+
 | Method | Endpoint | Description | Payload / Parameters |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/api/session/start` | Initializes a new cryptographic session and returns a 4-hex `session_id` and 32-char `secret_seed`. | None |
+| `GET` | `/api/ping` | Connectivity and token check (the app's **Test connection** button). | None |
+| `POST` | `/api/session/start` | Initializes a new cryptographic session and returns a 4-hex `session_id`, a 32-char `secret_seed` and the `hall_radius_m`. The professor's `location` becomes the geofence anchor. | `{ "location": { … }, "hall_radius_m"?: 30 }` |
 | `POST` | `/api/session/stop` | Terminates an active session and invalidates further token submissions. | `{ "session_id": "4A9F" }` |
-| `POST` | `/api/attendance/mark` | Validates the 5-second rolling token, checks `rssi >= -75`, and logs the hardware fingerprint. | `{ "session_id", "student_roll_no", "student_name", "rolling_code", "rssi", "device_mac_address" }` |
+| `POST` | `/api/attendance/mark` | Validates the 5-second rolling token, checks `rssi >= -75`, and logs the hardware fingerprint. | `{ "session_id", "student_roll_no", "student_name", "rolling_code", "rssi", "device_mac_address", "location": { … } }` |
 | `GET` | `/api/session/:session_id/report` | Returns all verified authentications and flags duplicate hardware fingerprints (`proxy_flagged: true`). | URL Param: `session_id` |
 
 ---

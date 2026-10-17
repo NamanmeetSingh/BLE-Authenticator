@@ -1,9 +1,11 @@
 import 'package:ble_attendance/main.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() {
   testWidgets('config bar switches between the student and professor screens', (tester) async {
+    SharedPreferences.setMockInitialValues({});
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(800, 1600);
     addTearDown(tester.view.reset);
@@ -11,6 +13,8 @@ void main() {
     await tester.pumpWidget(const AttendanceApp());
     expect(find.text('Backend Server URL'), findsOneWidget);
     expect(find.text('http://127.0.0.1:3000'), findsOneWidget);
+    expect(find.text('Access Token'), findsOneWidget);
+    expect(find.text('Test connection'), findsOneWidget);
     expect(find.text('Student Mode'), findsOneWidget);
     expect(find.text('Verify Both & Mark Attendance'), findsOneWidget);
 
@@ -20,7 +24,56 @@ void main() {
     expect(find.text('Start Attendance Broadcast'), findsOneWidget);
   });
 
+  testWidgets('the server URL and access token are remembered and restored', (tester) async {
+    SharedPreferences.setMockInitialValues({
+      'server_url': 'https://calm-river.trycloudflare.com',
+      'access_token': 'a-saved-demo-token',
+    });
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(800, 1600);
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(const AttendanceApp());
+    await tester.pumpAndSettle();
+
+    TextField field(String label) => tester.widget<TextField>(find.widgetWithText(TextField, label));
+    expect(field('Backend Server URL').controller!.text, 'https://calm-river.trycloudflare.com');
+    expect(field('Access Token').controller!.text, 'a-saved-demo-token');
+    expect(field('Access Token').obscureText, isTrue); // hidden until the eye icon is tapped
+
+    // an edit is saved straight away
+    await tester.enterText(find.widgetWithText(TextField, 'Backend Server URL'), 'https://new-name.trycloudflare.com');
+    await tester.pump();
+    expect((await SharedPreferences.getInstance()).getString('server_url'), 'https://new-name.trycloudflare.com');
+
+    // and plain http off the phone is called out
+    await tester.enterText(find.widgetWithText(TextField, 'Backend Server URL'), 'http://192.168.1.7:3000');
+    await tester.pump();
+    expect(find.textContaining('Plain http'), findsOneWidget);
+  });
+
+  test('server URLs: tunnels default to https, local addresses to http, and plain http off-device is flagged', () {
+    expect(AttendanceApi.parseBaseUrl('calm-river.trycloudflare.com').toString(), 'https://calm-river.trycloudflare.com');
+    expect(AttendanceApi.parseBaseUrl(' https://x.trycloudflare.com ').toString(), 'https://x.trycloudflare.com');
+    expect(AttendanceApi.parseBaseUrl('127.0.0.1:3000').toString(), 'http://127.0.0.1:3000');
+    expect(AttendanceApi.parseBaseUrl('192.168.1.7:3000').scheme, 'http');
+
+    expect(plainHttpWarning('https://x.trycloudflare.com'), isNull);
+    expect(plainHttpWarning('x.trycloudflare.com'), isNull); // no scheme: https
+    expect(plainHttpWarning('http://127.0.0.1:3000'), isNull); // USB: stays on the phone
+    expect(plainHttpWarning('http://192.168.1.7:3000'), isNotNull);
+    expect(plainHttpWarning('http://x.trycloudflare.com'), isNotNull);
+  });
+
+  test('a bad access token is told apart from an expired rolling code (both are 401)', () {
+    expect(const ApiException(401, AttendanceApi.authError).isAuthFailure, isTrue);
+    expect(const ApiException(401, 'invalid rolling code').isAuthFailure, isFalse);
+    expect(describeError(const ApiException(401, AttendanceApi.authError)), contains('access token'));
+    expect(describeError(const FormatException('bad')), 'That server URL is not valid.');
+  });
+
   testWidgets('student screen shows each check as its own step, and needs a name and roll first', (tester) async {
+    SharedPreferences.setMockInitialValues({});
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(800, 2400);
     addTearDown(tester.view.reset);
